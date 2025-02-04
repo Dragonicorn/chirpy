@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"log"
@@ -27,19 +28,64 @@ func readiness_handler (out http.ResponseWriter, req *http.Request) {
 	out.Write([]byte("OK\n"))
 }
 
-//number of requests (hits) handler
-func (cfg *apiConfig) hits_handler (out http.ResponseWriter, req *http.Request) {
-	out.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	out.WriteHeader(200)
-	out.Write([]byte(fmt.Sprintf("Hits: %v\n", cfg.fileserverHits.Load())))
+//hitcount handler
+func (cfg *apiConfig) adminHits_handler (w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write([]byte(fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", cfg.fileserverHits.Load())))
 }
 
-//reset number of requests (hits) handler
-func (cfg *apiConfig) resetHits_handler (out http.ResponseWriter, req *http.Request) {
+//reset hitcount handler
+func (cfg *apiConfig) resetHits_handler (w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
-	out.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	out.WriteHeader(200)
-	out.Write([]byte(fmt.Sprintf("Reset hit count to %v\n", cfg.fileserverHits.Load())))
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write([]byte(fmt.Sprintf("Reset hit count to %d\n", cfg.fileserverHits.Load())))
+}
+
+//JSON handler
+func validateChirp_handler(w http.ResponseWriter, r *http.Request) {
+	type reqBody struct {
+		Body string `json:"body"`
+	}
+	type resError struct {
+		Error string `json:"error"`
+	}
+	type resBody struct {
+		Valid bool `json:"valid"`
+	}
+	var body []byte
+	var req_body reqBody
+	var res_error resError
+	var res_body resBody
+	var res_code int
+
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&req_body)
+	if err != nil {
+		res_code = 400
+		res_error.Error = "Something went wrong"
+	}
+	if len(req_body.Body) > 140 {
+		res_code = 400
+		res_error.Error = "Chirp is too long"
+	} else {
+		res_code = 200
+		res_body.Valid = true
+	}
+	if res_code == 200 {
+		body, err = json.Marshal(res_body)
+		if err != nil {
+			res_code = 400
+			res_error.Error = "Something went wrong"
+		}
+	} 
+	if res_code == 400 {
+		body, err = json.Marshal(res_error)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(res_code)
+	w.Write(body)
 }
 
 func main() {
@@ -55,13 +101,15 @@ func main() {
 	//register file server handler
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 
+	//register reset hitcount handler
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetHits_handler)
+	//register hitcount handler
+	mux.HandleFunc("GET /admin/metrics", apiCfg.adminHits_handler)
+
 	//register readiness endpoint handler
 	mux.HandleFunc("GET /api/healthz", readiness_handler)
-
-	//register reset number of hits handler
-	mux.HandleFunc("POST /api/reset", apiCfg.resetHits_handler)
-	//register number of hits handler
-	mux.HandleFunc("GET /api/metrics", apiCfg.hits_handler)
+	//register chirp validation handler
+	mux.HandleFunc("POST /api/validate_chirp", validateChirp_handler)
 
 	// use net/http package to listen and serve on port 8080
 	ws.Handler = mux
