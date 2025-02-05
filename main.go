@@ -1,16 +1,36 @@
 package main
 
 import (
+	//"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"log"
+	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/Dragonicorn/chirpy/internal/database"
+
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
+
+// clone of sqlc internal database User structure with JSON tags
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string	`json:"email"`
+}
 
 // struct to hold any stateful in-memory data
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries *database.Queries
 }
 
 // increment fileserverHits
@@ -43,54 +63,80 @@ func (cfg *apiConfig) resetHits_handler (w http.ResponseWriter, r *http.Request)
 	w.Write([]byte(fmt.Sprintf("Reset hit count to %d\n", cfg.fileserverHits.Load())))
 }
 
+// helper functions to ease sending JSON responses
+/* payload should be a responseBody struct with arbitrary JSON entries such as:
+	var responseBody struct {
+		Body string `json:"cleaned_body"`
+	}
+*/
+func respondWithJSON(w http.ResponseWriter, code int, responseBody interface{}) {
+	body, err := json.Marshal(responseBody)
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		w.Write(body)
+	}
+}
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	var responseError struct {
+		Error string `json:"error"`
+	}
+	responseError.Error = msg
+	respondWithJSON(w, code, responseError)
+}
+
+func profanity_filter (text string) string {
+	clean_text := ""
+	if len(text) > 0 {
+		profane_words := []string{"kerfuffle", "sharbert", "fornax"}
+		text_words := strings.Split(text, " ")
+		for i, word := range text_words {
+			for _, test := range profane_words {
+				if strings.ToLower(word) == test {
+					text_words[i] = "****"
+				}
+			}
+		}
+		clean_text = strings.Join(text_words, " ")
+	}
+	return clean_text
+}
+
 //JSON handler
 func validateChirp_handler(w http.ResponseWriter, r *http.Request) {
 	type reqBody struct {
 		Body string `json:"body"`
 	}
-	type resError struct {
-		Error string `json:"error"`
-	}
 	type resBody struct {
-		Valid bool `json:"valid"`
+		Body string `json:"cleaned_body"`
 	}
-	var body []byte
-	var req_body reqBody
-	var res_error resError
-	var res_body resBody
-	var res_code int
+	var requestBody reqBody
+	var responseBody resBody
 
-	decoder := json.NewDecoder(r.Body)
-	err := decoder.Decode(&req_body)
+	err := json.NewDecoder(r.Body).Decode(&requestBody)
 	if err != nil {
-		res_code = 400
-		res_error.Error = "Something went wrong"
+		respondWithError(w, 400, "Something went wrong")
+		return
 	}
-	if len(req_body.Body) > 140 {
-		res_code = 400
-		res_error.Error = "Chirp is too long"
-	} else {
-		res_code = 200
-		res_body.Valid = true
+
+	if len(requestBody.Body) > 140 {
+		respondWithError(w, 400, "Chirp is too long")
+		return
 	}
-	if res_code == 200 {
-		body, err = json.Marshal(res_body)
-		if err != nil {
-			res_code = 400
-			res_error.Error = "Something went wrong"
-		}
-	} 
-	if res_code == 400 {
-		body, err = json.Marshal(res_error)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(res_code)
-	w.Write(body)
+	responseBody.Body = profanity_filter(requestBody.Body)
+	respondWithJSON(w, 200, responseBody)
 }
 
 func main() {
+	// load database connection string using environment variable
+	godotenv.Load()
+	db, err := sql.Open("postgres", os.Getenv("DB_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	var apiCfg apiConfig
+	apiCfg.dbQueries = database.New(db)
 	var ws http.Server
 	mux := http.NewServeMux()
 
@@ -114,7 +160,7 @@ func main() {
 	// use net/http package to listen and serve on port 8080
 	ws.Handler = mux
 	ws.Addr = ":8080"
-	err := ws.ListenAndServe()
+	err = ws.ListenAndServe()
 	if err != nil {
 		log.Fatal(err)
 	}
