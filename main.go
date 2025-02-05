@@ -29,6 +29,7 @@ type User struct {
 
 // struct to hold any stateful in-memory data
 type apiConfig struct {
+	platform string
 	fileserverHits atomic.Int32
 	dbQueries *database.Queries
 }
@@ -55,12 +56,21 @@ func (cfg *apiConfig) adminHits_handler (w http.ResponseWriter, r *http.Request)
 	w.Write([]byte(fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", cfg.fileserverHits.Load())))
 }
 
-//reset hitcount handler
-func (cfg *apiConfig) resetHits_handler (w http.ResponseWriter, r *http.Request) {
+//reset handler
+func (cfg *apiConfig) reset_handler (w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
+	if cfg.platform != "dev" {
+		respondWithError(w, 403, "Unable to perform request")
+		return
+	}
+	err := cfg.dbQueries.DeleteUsers(r.Context())
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
-	w.Write([]byte(fmt.Sprintf("Reset hit count to %d\n", cfg.fileserverHits.Load())))
+	w.Write([]byte(fmt.Sprintf("Deleted users and reset hit count to %d\n", cfg.fileserverHits.Load())))
 }
 
 // helper functions to ease sending JSON responses
@@ -127,6 +137,30 @@ func validateChirp_handler(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 200, responseBody)
 }
 
+func (cfg *apiConfig) createUser_handler(w http.ResponseWriter, r *http.Request) {
+	type reqBody struct {
+		Email string `json:"email"`
+	}
+	var requestBody reqBody
+	var responseUser database.User
+	var responseBody User
+	err := json.NewDecoder(r.Body).Decode(&requestBody)
+	if err != nil {
+		respondWithError(w, 400, "Something went wrong decoding user request JSON")
+		return
+	}
+	responseUser, err = cfg.dbQueries.CreateUser(r.Context(), requestBody.Email)
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+		return
+	}
+	responseBody.ID = responseUser.ID
+	responseBody.CreatedAt = responseUser.CreatedAt
+	responseBody.UpdatedAt = responseUser.UpdatedAt
+	responseBody.Email = responseUser.Email
+	respondWithJSON(w, 201, responseBody)
+}
+
 func main() {
 	// load database connection string using environment variable
 	godotenv.Load()
@@ -136,6 +170,7 @@ func main() {
 	}
 
 	var apiCfg apiConfig
+	apiCfg.platform = os.Getenv("PLATFORM")
 	apiCfg.dbQueries = database.New(db)
 	var ws http.Server
 	mux := http.NewServeMux()
@@ -147,8 +182,8 @@ func main() {
 	//register file server handler
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", fs)))
 
-	//register reset hitcount handler
-	mux.HandleFunc("POST /admin/reset", apiCfg.resetHits_handler)
+	//register reset handler
+	mux.HandleFunc("POST /admin/reset", apiCfg.reset_handler)
 	//register hitcount handler
 	mux.HandleFunc("GET /admin/metrics", apiCfg.adminHits_handler)
 
@@ -156,6 +191,9 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", readiness_handler)
 	//register chirp validation handler
 	mux.HandleFunc("POST /api/validate_chirp", validateChirp_handler)
+
+	//register create user handler
+	mux.HandleFunc("POST /api/users", apiCfg.createUser_handler)
 
 	// use net/http package to listen and serve on port 8080
 	ws.Handler = mux
