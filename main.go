@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Dragonicorn/chirpy/internal/auth"
 	"github.com/Dragonicorn/chirpy/internal/database"
 
 	"github.com/google/uuid"
@@ -25,6 +26,16 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string	`json:"email"`
+	hashedPassword string
+}
+
+// clone of sqlc internal database User structure with JSON tags
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string	`json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 // struct to hold any stateful in-memory data
@@ -112,33 +123,121 @@ func profanity_filter (text string) string {
 	return clean_text
 }
 
-//JSON handler
-func validateChirp_handler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) postChirp_handler(w http.ResponseWriter, r *http.Request) {
 	type reqBody struct {
 		Body string `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
 	type resBody struct {
 		Body string `json:"cleaned_body"`
 	}
 	var requestBody reqBody
-	var responseBody resBody
+	var responseChirp database.Chirp
+	var responseBody Chirp
 
 	err := json.NewDecoder(r.Body).Decode(&requestBody)
 	if err != nil {
-		respondWithError(w, 400, "Something went wrong")
+		respondWithError(w, 400, "Something went wrong decoding chirp request JSON")
 		return
 	}
-
 	if len(requestBody.Body) > 140 {
 		respondWithError(w, 400, "Chirp is too long")
 		return
 	}
-	responseBody.Body = profanity_filter(requestBody.Body)
-	respondWithJSON(w, 200, responseBody)
+
+	//responseBody.Body = profanity_filter(requestBody.Body)
+
+	responseChirp, err = cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{Body: requestBody.Body, UserID: requestBody.UserID})
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+		return
+	}
+	responseBody.ID = responseChirp.ID
+	responseBody.CreatedAt = responseChirp.CreatedAt
+	responseBody.UpdatedAt = responseChirp.UpdatedAt
+	responseBody.Body = responseChirp.Body
+	responseBody.UserID = responseChirp.UserID
+	respondWithJSON(w, 201, responseBody)
+}
+
+func (cfg *apiConfig) getChirp_handler(w http.ResponseWriter, r *http.Request) {
+	var response Chirp
+	var responseBody []Chirp
+
+	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+	if err == nil {
+		responseChirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpID)
+		if err != nil {
+			respondWithError(w, 404, fmt.Sprintf("Database error: %s\n", err))
+			return
+		}
+		response.ID = responseChirp.ID
+		response.CreatedAt = responseChirp.CreatedAt
+		response.UpdatedAt = responseChirp.UpdatedAt
+		response.Body = responseChirp.Body
+		response.UserID = responseChirp.UserID
+		responseBody = append(responseBody, response)
+		respondWithJSON(w, 200, responseBody[0])
+	} else {
+		responseChirps, err := cfg.dbQueries.GetChirps(r.Context())
+		if err != nil {
+			respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+			return
+		}
+		for _, responseChirp := range responseChirps {
+			response.ID = responseChirp.ID
+			response.CreatedAt = responseChirp.CreatedAt
+			response.UpdatedAt = responseChirp.UpdatedAt
+			response.Body = responseChirp.Body
+			response.UserID = responseChirp.UserID
+			responseBody = append(responseBody, response)
+		}
+		respondWithJSON(w, 200, responseBody)
+	}
 }
 
 func (cfg *apiConfig) createUser_handler(w http.ResponseWriter, r *http.Request) {
 	type reqBody struct {
+		Password string `json:"password"`
+		Email string `json:"email"`
+	}
+	//type createUserParams struct {
+	//	Email          string
+	//	HashedPassword string
+	//}
+	var requestBody reqBody
+	var responseUser database.User
+	var responseBody User
+	//var userParams createUserParams
+	var hash string
+	err := json.NewDecoder(r.Body).Decode(&requestBody)
+	if err != nil {
+		respondWithError(w, 400, "Something went wrong decoding user request JSON")
+		return
+	}
+	//userParams.Email = requestBody.Email
+	//userParams.HashedPassword, err = HashPassword(requestBody.Password)
+	hash, err = auth.HashPassword(requestBody.Password)
+	if err != nil {
+		respondWithError(w, 400, "Unable to create password hash")
+		return
+	}
+	//responseUser, err = cfg.dbQueries.CreateUser(r.Context(), userParams)
+	responseUser, err = cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{Email: requestBody.Email, HashedPassword: hash})
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+		return
+	}
+	responseBody.ID = responseUser.ID
+	responseBody.CreatedAt = responseUser.CreatedAt
+	responseBody.UpdatedAt = responseUser.UpdatedAt
+	responseBody.Email = responseUser.Email
+	respondWithJSON(w, 201, responseBody)
+}
+
+func (cfg *apiConfig) loginUser_handler(w http.ResponseWriter, r *http.Request) {
+	type reqBody struct {
+		Password string `json:"password"`
 		Email string `json:"email"`
 	}
 	var requestBody reqBody
@@ -149,16 +248,21 @@ func (cfg *apiConfig) createUser_handler(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, 400, "Something went wrong decoding user request JSON")
 		return
 	}
-	responseUser, err = cfg.dbQueries.CreateUser(r.Context(), requestBody.Email)
+	responseUser, err = cfg.dbQueries.GetUser(r.Context(), requestBody.Email)
 	if err != nil {
 		respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+		return
+	}
+	err = auth.CheckPasswordHash(requestBody.Password, responseUser.HashedPassword)
+	if err != nil {
+		respondWithError(w, 401, fmt.Sprintf("Incorrect email or password"))
 		return
 	}
 	responseBody.ID = responseUser.ID
 	responseBody.CreatedAt = responseUser.CreatedAt
 	responseBody.UpdatedAt = responseUser.UpdatedAt
 	responseBody.Email = responseUser.Email
-	respondWithJSON(w, 201, responseBody)
+	respondWithJSON(w, 200, responseBody)
 }
 
 func main() {
@@ -190,10 +294,14 @@ func main() {
 	//register readiness endpoint handler
 	mux.HandleFunc("GET /api/healthz", readiness_handler)
 	//register chirp validation handler
-	mux.HandleFunc("POST /api/validate_chirp", validateChirp_handler)
+	mux.HandleFunc("POST /api/chirps", apiCfg.postChirp_handler)
+	//register chirp retrieval handler
+	mux.HandleFunc("GET /api/chirps", apiCfg.getChirp_handler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp_handler)
 
 	//register create user handler
 	mux.HandleFunc("POST /api/users", apiCfg.createUser_handler)
+	mux.HandleFunc("POST /api/login", apiCfg.loginUser_handler)
 
 	// use net/http package to listen and serve on port 8080
 	ws.Handler = mux
