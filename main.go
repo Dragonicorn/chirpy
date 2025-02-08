@@ -4,6 +4,7 @@ import (
 	//"context"
 	"database/sql"
 	"encoding/json"
+	//"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -27,6 +28,7 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string	`json:"email"`
 	hashedPassword string
+	Token     string    `json:"token"`
 }
 
 // clone of sqlc internal database User structure with JSON tags
@@ -41,6 +43,7 @@ type Chirp struct {
 // struct to hold any stateful in-memory data
 type apiConfig struct {
 	platform string
+	secretKey string
 	fileserverHits atomic.Int32
 	dbQueries *database.Queries
 }
@@ -134,8 +137,25 @@ func (cfg *apiConfig) postChirp_handler(w http.ResponseWriter, r *http.Request) 
 	var requestBody reqBody
 	var responseChirp database.Chirp
 	var responseBody Chirp
+	var userID uuid.UUID
+	
+	//tokenString := headers["Authorization"][0]
+	for h := range r.Header {
+		fmt.Printf("\nHeader Attribute: %v, Value: %v", h, h[0])
+	}
+	fmt.Println()
 
-	err := json.NewDecoder(r.Body).Decode(&requestBody)
+	userToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 400, "Something went wrong reading Bearer Token String")
+		return
+	}
+	userID, err = auth.ValidateJWT(userToken, cfg.secretKey)
+	if err != nil {
+		respondWithError(w, 401, "Invalid Bearer Token String")
+		return
+	}
+	err = json.NewDecoder(r.Body).Decode(&requestBody)
 	if err != nil {
 		respondWithError(w, 400, "Something went wrong decoding chirp request JSON")
 		return
@@ -146,8 +166,8 @@ func (cfg *apiConfig) postChirp_handler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	//responseBody.Body = profanity_filter(requestBody.Body)
-
-	responseChirp, err = cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{Body: requestBody.Body, UserID: requestBody.UserID})
+	//responseChirp, err = cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{Body: requestBody.Body, UserID: requestBody.UserID})
+	responseChirp, err = cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{Body: requestBody.Body, UserID: userID})
 	if err != nil {
 		respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
 		return
@@ -239,10 +259,12 @@ func (cfg *apiConfig) loginUser_handler(w http.ResponseWriter, r *http.Request) 
 	type reqBody struct {
 		Password string `json:"password"`
 		Email string `json:"email"`
+		ExpiresIn int `json:"expires_in_seconds"`
 	}
 	var requestBody reqBody
 	var responseUser database.User
 	var responseBody User
+	var userJWT string
 	err := json.NewDecoder(r.Body).Decode(&requestBody)
 	if err != nil {
 		respondWithError(w, 400, "Something went wrong decoding user request JSON")
@@ -258,10 +280,20 @@ func (cfg *apiConfig) loginUser_handler(w http.ResponseWriter, r *http.Request) 
 		respondWithError(w, 401, fmt.Sprintf("Incorrect email or password"))
 		return
 	}
+	// create JWT for session authentication
+	if requestBody.ExpiresIn == 0 || requestBody.ExpiresIn > 3600 {
+		requestBody.ExpiresIn = 3600
+	}
+	userJWT, err = auth.MakeJWT(responseUser.ID, cfg.secretKey, time.Duration(requestBody.ExpiresIn) * time.Second)
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("Something went wrong creating security token"))
+		return
+	}
 	responseBody.ID = responseUser.ID
 	responseBody.CreatedAt = responseUser.CreatedAt
 	responseBody.UpdatedAt = responseUser.UpdatedAt
 	responseBody.Email = responseUser.Email
+	responseBody.Token = userJWT
 	respondWithJSON(w, 200, responseBody)
 }
 
@@ -275,6 +307,7 @@ func main() {
 
 	var apiCfg apiConfig
 	apiCfg.platform = os.Getenv("PLATFORM")
+	apiCfg.secretKey = os.Getenv("SECRET_KEY")
 	apiCfg.dbQueries = database.New(db)
 	var ws http.Server
 	mux := http.NewServeMux()
