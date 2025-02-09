@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,15 +25,8 @@ func CheckPasswordHash(password, hash string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
-/*type chirpyClaims struct {
-	Issuer		string
-	Subject		string
-	ExpiresAt	jwt.NewNumericDate
-	IssuedAt	jwt.NewNumericDate
-	NotBefore	jwt.NewNumericDate
-	jwt.RegisteredClaims
-}*/
-/*type RegisteredClaims struct {
+/*
+type RegisteredClaims struct {
 	Issuer    string                   `json:"iss,omitempty"`
 	Subject   string                   `json:"sub,omitempty"`
 	Audience  StringOrSlice            `json:"aud,omitempty"`
@@ -79,29 +74,40 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	}
 	userID, err = uuid.Parse(claims.Subject)
 	return userID, nil
-
-	/*claims := jwt.MapClaims{}
-	var userID uuid.UUID
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHS256); !ok {
-			return nil, fmt.Errorf("Error with token signing method")
-		}
-		return secretKey, nil
-	})
-	if err != nil {
-		return nil, err
-	//} else if claims, ok := token.Claims.(*claims); ok {
-	//	return claims.RegisteredClaims.Subject, nil
-	//} else {
-	//	return userID, err
-	}*/
 }
 
 func GetBearerToken(headers http.Header) (string, error) {
-	tokenString := strings.TrimPrefix(headers["Authorization"][0], "Bearer ")
-	//fmt.Printf("\nAuthorization Token '%v' found\n\n", tokenString)
-	if tokenString == "" {
-		return tokenString, errors.New("No Bearer Token String provided in request")
+	var tokenString string
+	var err error
+	if _, ok := headers["Authorization"]; ok {
+		tokenString = strings.TrimPrefix(headers["Authorization"][0], "Bearer ")
+		fmt.Printf("\nAuthorization Token '%v' [length: %d] found\n\n", tokenString, len(tokenString))
 	}
-	return tokenString, nil
+	if tokenString == "" {
+		err = errors.New("No Bearer Token String provided in request")
+	}
+	return tokenString, err
 }
+
+func MakeRefreshToken() (string, error) {
+	token := make([]byte, 32)
+	_, err := rand.Read(token)
+	if err != nil {
+		fmt.Printf("MakeRefreshToken: %v reading random number", err)
+	}
+	return hex.EncodeToString(token), err
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	var apiKey string
+	var err error
+	if _, ok := headers["Authorization"]; ok {
+		apiKey = strings.TrimPrefix(headers["Authorization"][0], "ApiKey ")
+		fmt.Printf("\nAuthorization API Key '%v' [length: %d] found\n\n", apiKey, len(apiKey))
+	}
+	if apiKey == "" {
+		err = errors.New("No API Key provided in request")
+	}
+	return apiKey, err
+}
+
