@@ -185,38 +185,68 @@ func (cfg *apiConfig) postChirp_handler(w http.ResponseWriter, r *http.Request) 
 
 func (cfg *apiConfig) getChirp_handler(w http.ResponseWriter, r *http.Request) {
 	var response Chirp
+	var responseChirps []database.Chirp
 	var responseBody []Chirp
+	var sortBy string
 
-	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
-	if err == nil {
-		responseChirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpID)
-		if err != nil {
-			respondWithError(w, 404, fmt.Sprintf("Database error: %s\n", err))
-			return
-		}
-		response.ID = responseChirp.ID
-		response.CreatedAt = responseChirp.CreatedAt
-		response.UpdatedAt = responseChirp.UpdatedAt
-		response.Body = responseChirp.Body
-		response.UserID = responseChirp.UserID
-		responseBody = append(responseBody, response)
-		respondWithJSON(w, 200, responseBody[0])
-	} else {
-		responseChirps, err := cfg.dbQueries.GetChirps(r.Context())
+	authorID := r.URL.Query().Get("author_id")
+	fmt.Printf("\nauthor_id: %s, length: %d\n", authorID, len(authorID))
+	switch strings.ToUpper(r.URL.Query().Get("sort")) {
+	case "DESC":
+		sortBy = "DESC"
+	case "ASC":
+		fallthrough
+	default:
+		sortBy = "ASC"
+	}
+	fmt.Printf("Sort By: %s\n", sortBy)
+
+	if len(authorID) > 0 {
+		userID, err := uuid.Parse(authorID)
 		if err != nil {
 			respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
 			return
 		}
-		for _, responseChirp := range responseChirps {
+		fmt.Printf("User ID: %v\n", userID)
+		//responseChirps, err = cfg.dbQueries.GetUserChirps(r.Context(), userID)
+		responseChirps, err = cfg.dbQueries.GetUserChirps(r.Context(), database.GetUserChirpsParams{UserID: userID, Column2: sortBy})
+		if err != nil {
+			respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+			return
+		}
+	} else {
+		chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+		if err == nil {
+			responseChirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpID)
+			if err != nil {
+				respondWithError(w, 404, fmt.Sprintf("Database error: %s\n", err))
+				return
+			}
 			response.ID = responseChirp.ID
 			response.CreatedAt = responseChirp.CreatedAt
 			response.UpdatedAt = responseChirp.UpdatedAt
 			response.Body = responseChirp.Body
 			response.UserID = responseChirp.UserID
 			responseBody = append(responseBody, response)
+			respondWithJSON(w, 200, responseBody[0])
+			return
+		} else {
+			responseChirps, err = cfg.dbQueries.GetChirps(r.Context(), sortBy)
+			if err != nil {
+				respondWithError(w, 400, fmt.Sprintf("Database error: %s\n", err))
+				return
+			}
 		}
-		respondWithJSON(w, 200, responseBody)
 	}
+	for _, responseChirp := range responseChirps {
+		response.ID = responseChirp.ID
+		response.CreatedAt = responseChirp.CreatedAt
+		response.UpdatedAt = responseChirp.UpdatedAt
+		response.Body = responseChirp.Body
+		response.UserID = responseChirp.UserID
+		responseBody = append(responseBody, response)
+	}
+	respondWithJSON(w, 200, responseBody)
 }
 
 func (cfg *apiConfig) deleteChirp_handler(w http.ResponseWriter, r *http.Request) {
